@@ -1,0 +1,13 @@
+# auto-downloaded on first run (see installer.js) — never commit binaries
+bin/*.exe
+bin/*.7z
+bin/*.extract/
+
+# deps & logs
+node_modules/
+*.log
+npm-debug.log*
+
+# OS junk
+.DS_Store
+Thumbs.db
