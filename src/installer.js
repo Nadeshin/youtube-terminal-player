@@ -42,7 +42,7 @@ export async function ensureBinaries() {
   const isWin = process.platform === 'win32';
 
   if (!fs.existsSync(ytDlpPath)) {
-    console.log(chalk.yellow('⏳ Downloading yt-dlp binary...'));
+    console.log(chalk.yellow('Downloading yt-dlp binary...'));
     if (isWin) {
       const url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
       execSync(`powershell -Command "Invoke-WebRequest -Uri '${url}' -OutFile '${ytDlpPath}'"`);
@@ -54,7 +54,7 @@ export async function ensureBinaries() {
   }
 
   if (!fs.existsSync(mpvPath)) {
-    console.log(chalk.yellow('⏳ Downloading mpv binary for audio streaming...'));
+    console.log(chalk.yellow('Downloading mpv binary for audio streaming...'));
     try {
       if (isWin) {
         await downloadMpvWindows(path.join(BIN_DIR, 'mpv.exe'));

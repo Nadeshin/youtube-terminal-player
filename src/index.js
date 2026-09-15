@@ -115,7 +115,7 @@ function promptSearch() {
   activePromptRl = rl;
 
   console.log('\n');
-  rl.question(chalk.bold.yellow('🔎 Title / Artist / YouTube link (Esc = cancel): '), async (input) => {
+  rl.question(chalk.bold.yellow('Title / Artist / YouTube link (Esc = cancel): '), async (input) => {
     rl.close();
     activePromptRl = null;
     isPrompting = false;
@@ -173,7 +173,7 @@ function promptQueueEdit() {
   activePromptRl = rl;
 
   console.log('\n');
-  rl.question(chalk.bold.yellow(`🗑 Delete queue number (1-${queue.length}) or "all" (Esc = cancel): `), (input) => {
+  rl.question(chalk.bold.yellow(`Delete queue number (1-${queue.length}) or "all" (Esc = cancel): `), (input) => {
     rl.close();
     activePromptRl = null;
     isPrompting = false;
@@ -185,13 +185,13 @@ function promptQueueEdit() {
 
     const s = input.trim().toLowerCase();
     if (s === 'semua' || s === 'all' || s === '0') {
-      statusMessage = `🗑 ${queue.length} songs removed from the queue.`;
+      statusMessage = `${queue.length} songs removed from the queue.`;
       queue = [];
     } else {
       const num = parseInt(s, 10);
       if (!Number.isNaN(num) && num >= 1 && num <= queue.length) {
         const removed = queue.splice(num - 1, 1)[0];
-        statusMessage = `🗑 Removed from queue: "${removed.title}"`;
+        statusMessage = `Removed from queue: "${removed.title}"`;
       } else {
         statusMessage = 'Queue edit cancelled.';
       }
@@ -210,7 +210,7 @@ function openQueueEdit() {
   if (player.state === 'PLAYING') {
     player.pause();
   } else if (player.state === 'LOADING') {
-      statusMessage = '⏳ Wait for the song to start before editing the queue.';
+      statusMessage = 'Wait for the song to start before editing the queue.';
     updateUI();
     return;
   }
@@ -246,7 +246,7 @@ process.stdin.on('keypress', async (str, key) => {
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.stdin.pause();
     process.stdout.write('\x1B[2J\x1B[3J\x1B[H');
-    console.log(chalk.bold.green('👋 Thanks for using YouTube Terminal Player! See you.'));
+    console.log(chalk.bold.green('Thanks for using YouTube Terminal Player! See you.'));
     process.exit(0);
   }
 
@@ -254,10 +254,10 @@ process.stdin.on('keypress', async (str, key) => {
   if (key.name === 'f') {
     if (player.state === 'PLAYING') {
       player.pause();
-      statusMessage = '⏸ Auto-paused — go ahead and search/add songs.';
+      statusMessage = 'Auto-paused — go ahead and search/add songs.';
       updateUI();
     } else if (player.state === 'LOADING') {
-      statusMessage = '⏳ Wait for the song to start before searching.';
+      statusMessage = 'Wait for the song to start before searching.';
       updateUI();
       return;
     }
@@ -269,9 +269,9 @@ process.stdin.on('keypress', async (str, key) => {
   if (key.name === 'v') {
     if (player.state === 'PLAYING' && player.streamUrl) {
       player.refreshSpectrum();
-      statusMessage = '📊 Spectrum refreshed from the song position.';
+      statusMessage = 'Spectrum refreshed from the song position.';
     } else {
-      statusMessage = '📊 Spectrum only runs while a song is playing.';
+      statusMessage = 'Spectrum only runs while a song is playing.';
     }
     updateUI();
     return;
@@ -323,19 +323,19 @@ process.stdin.on('keypress', async (str, key) => {
   }
   if (key.name === 'left') {
     player.seek(-10);
-    statusMessage = `⏪ Back 10s → ${formatTime(player.currentTime)} / ${formatTime(player.duration)}`;
+    statusMessage = `Back 10s → ${formatTime(player.currentTime)} / ${formatTime(player.duration)}`;
     updateUI();
     return;
   }
   if (key.name === 'right') {
     player.seek(10);
-    statusMessage = `⏩ Forward 10s → ${formatTime(player.currentTime)} / ${formatTime(player.duration)}`;
+    statusMessage = `Forward 10s → ${formatTime(player.currentTime)} / ${formatTime(player.duration)}`;
     updateUI();
     return;
   }
   if (key.name === 'r') {
     player.replay();
-    statusMessage = '🔁 Replaying from the start';
+    statusMessage = 'Replaying from the start';
     updateUI();
     return;
   }
@@ -352,7 +352,7 @@ process.stdin.on('keypress', async (str, key) => {
 
 // App Startup
 async function main() {
-  console.log(chalk.cyan('🚀 Checking binary dependencies (yt-dlp & mpv)...'));
+  console.log(chalk.cyan('Checking binary dependencies (yt-dlp & mpv)...'));
   await ensureBinaries();
 
   startUIRefreshLoop();

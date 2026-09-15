@@ -27,7 +27,7 @@ function spectrumPanel(spec, active) {
   const W = 2;
   const empty = !spec || !spec.length;
   const bars = empty ? new Array(12).fill(0) : spec;
-  const rows = ['   📊 SPECTRUM:'];
+  const rows = ['   SPECTRUM:'];
   for (let r = H; r >= 1; r--) {
     let line = '   ';
     bars.forEach((v) => {
@@ -70,10 +70,10 @@ export function renderUI({
     const isPaused = player.state === 'PAUSED';
     const isLoading = player.state === 'LOADING';
 
-    let statusTag = chalk.bgGreen.black(' ▶ PLAYING ');
-    if (isPaused) statusTag = chalk.bgYellow.black(' ⏸ PAUSED ');
-    if (isLoading) statusTag = chalk.bgCyan.black(' ⏳ LOADING STREAM... ');
-    if (player.state === 'STOPPED') statusTag = chalk.bgRed.white(' ⏹ STOPPED ');
+    let statusTag = chalk.bgGreen.black(' PLAYING ');
+    if (isPaused) statusTag = chalk.bgYellow.black(' PAUSED ');
+    if (isLoading) statusTag = chalk.bgCyan.black(' LOADING STREAM... ');
+    if (player.state === 'STOPPED') statusTag = chalk.bgRed.white(' STOPPED ');
 
     // ponytail: real spectrum from the analyzer (panel below); dimmed + frozen while paused
     const spec = player.getSpectrum ? player.getSpectrum() : null;
@@ -105,11 +105,11 @@ export function renderUI({
 
   // Mode Specific View
   if (mode === 'SEARCH') {
-    lines.push(chalk.bold.white('🔍 FIND MUSIC / YOUTUBE VIDEOS:'));
+    lines.push(chalk.bold.white('FIND MUSIC / YOUTUBE VIDEOS:'));
     lines.push(chalk.dim('   Type a song title / artist name or paste a YouTube link.'));
     lines.push('');
   } else if (mode === 'RESULTS') {
-    lines.push(chalk.bold.white(`🔎 SEARCH RESULTS FOR: "${chalk.cyan(query)}"`));
+    lines.push(chalk.bold.white(`SEARCH RESULTS FOR: "${chalk.cyan(query)}"`));
     lines.push(chalk.dim('   [Use ↑/↓ to choose, [Enter] to Play, [a] to Queue]'));
     lines.push('');
 
@@ -140,7 +140,7 @@ export function renderUI({
 
   // Queue View
   if (queue && queue.length > 0) {
-    lines.push(chalk.bold.white(`📋 SONG QUEUE (${queue.length}):`));
+    lines.push(chalk.bold.white(`SONG QUEUE (${queue.length}):`));
     queue.slice(0, 4).forEach((qItem, idx) => {
       lines.push(chalk.dim(`   ${idx + 1}. ${fit(qItem.title, 55)} [${qItem.duration}]`));
     });
@@ -152,13 +152,13 @@ export function renderUI({
 
   // Status Message / Alert
   if (statusMessage) {
-    lines.push(chalk.yellow(`ℹ ${statusMessage}`));
+    lines.push(chalk.yellow(statusMessage));
     lines.push('');
   }
 
   // Hotkeys & Controls Legend
   lines.push(chalk.bold.cyan('==============================================================='));
-  lines.push(chalk.bold.white('⌨ CONTROLS:'));
+  lines.push(chalk.bold.white('CONTROLS:'));
   if (mode === 'RESULTS') {
     lines.push(
       ` ${chalk.bold.yellow('[↑/↓]')} Select  ` +
