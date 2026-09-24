@@ -6,6 +6,25 @@ import { getBinaryPaths } from './installer.js';
 export const SPEC_SR = 16000;
 export const SPEC_N = 256;
 export const SPEC_BARS = 12;
+// Kecepatan respons spektrum = seberapa cepat bar jatuh per frame (10 frame/detik).
+// Lambat 0.9 (ekor panjang, kalem), Normal 0.8, Cepat 0.65 (nendang ikut beat).
+export const SPEC_SPEEDS = { lambat: 0.9, normal: 0.8, cepat: 0.65 };
+export const SPEC_SPEED_ORDER = ['lambat', 'normal', 'cepat'];
+// Drop spektrum menempel ke mode: lambat & normal drop saat lagu selesai, kencang tidak.
+export const SPEC_DROP = { lambat: true, normal: true, cepat: false };
+export function specDropFor(name) {
+  return SPEC_DROP[name] ?? true;
+}
+export function specSpeedLabel(s) {
+  return s === 'lambat' ? 'Lambat' : s === 'cepat' ? 'Cepat' : 'Normal';
+}
+export function applySpecSpeed(analyzer, name) {
+  if (analyzer && name in SPEC_SPEEDS) {
+    analyzer.release = SPEC_SPEEDS[name];
+    return true;
+  }
+  return false;
+}
 const NEED = SPEC_N * 2; // byte PCM s16le mono
 
 // Radix-2 Cooley-Tukey, power-of-2 input length. Returns first-half magnitudes.
@@ -56,10 +75,12 @@ export class SpectrumAnalyzer {
     this.proc = null;
     this.buf = Buffer.alloc(0);
     this.smooth = null; // last frame (frozen while paused, null before any data)
+    this.release = SPEC_SPEEDS.normal; // kecepatan jatuh bar — diubah via Settings
     this.url = null;
     this.offset = 0;
     this._wantRun = false;
     this._lastData = 0;
+    this._startAt = 0;
     this._lastFrame = null;
     this._lastMove = 0;
     this._lastRefresh = 0;
@@ -67,41 +88,87 @@ export class SpectrumAnalyzer {
 
   start(url, offsetSec = 0) {
     this.stop();
+    // NB: tidak drop() di sini — restart karena seek/refresh harus menjembatani
+    // jeda reconnect dengan frame terakhir (beku), bukan layar rata.
+    // drop() hanya untuk lagu selesai (_onEnded) dan lagu baru (playTrack).
     this.url = url;
     this.offset = offsetSec;
     this._wantRun = true;
-    this._lastData = 0; // grace period until the first data arrives
+    this._lastData = 0;
+    this._startAt = Date.now();
+    this.buf = Buffer.alloc(0);
+    this._lastFrame = null;
+    this._lastMove = Date.now();
     const { ffmpegPath } = getBinaryPaths();
     // -ss before -i: analysis decodes from the song position (in sync with mpv)
-    const args = ['-re', '-nostats', '-loglevel', 'error'];
+    const args = ['-re', '-nostats', '-loglevel', 'error', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2'];
     if (offsetSec > 0) args.push('-ss', String(Math.floor(offsetSec)));
     args.push('-i', url, '-ac', '1', '-ar', String(SPEC_SR), '-f', 's16le', '-');
     this.proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'ignore'] });
-    this.proc.stdout.on('data', (d) => {
+    const curProc = this.proc;
+    curProc.stdout.on('data', (d) => {
+      if (curProc !== this.proc) return;
       // always the newest 16ms window — no backlog, no lag
       this.buf = Buffer.concat([this.buf, d]);
       if (this.buf.length > NEED) this.buf = this.buf.subarray(this.buf.length - NEED);
       this._lastData = Date.now();
     });
-    this.proc.on('error', () => {});
+    curProc.on('error', () => {
+      if (curProc === this.proc) {
+        // leave _lastData at 0 so watchdog detects dead proc
+      }
+    });
+    curProc.on('close', () => {
+      if (curProc === this.proc) {
+        // keep reference but mark dead via exitCode; watchdog will restart
+      }
+    });
   }
 
   stop() {
     this._wantRun = false;
+    this._startAt = 0;
     if (this.proc) {
       try { this.proc.kill();       } catch { /* ignore */ }
       this.proc = null;
     }
+    this.buf = Buffer.alloc(0);
+  }
+
+  // Drop ke nol (lagu selesai): beda dari stop() yang membekukan frame terakhir untuk pause.
+  drop() {
+    this.buf = Buffer.alloc(0);
+    this.smooth = new Array(SPEC_BARS).fill(0);
+    this._lastFrame = null;
+    this._lastMove = 0;
   }
 
   // Returns twelve 0..1 values, or the last frame/null when no fresh data exists.
   levels() {
-    // ponytail: watchdog — dead/stuck analysis (>3s without data) restarts itself
-    if (this._wantRun && this._lastData > 0 && Date.now() - this._lastData > 3000) {
+    const now = Date.now();
+    // watchdog 1: ffmpeg dead / never delivered data (>3s since start without any data)
+    if (this._wantRun && this._lastData === 0 && this._startAt && now - this._startAt > 3000) {
+      if (now - this._lastRefresh > 2000) {
+        this._lastRefresh = now;
+        this.start(this.url, this.offset);
+      }
+      return this.smooth;
+    }
+    // watchdog 2: previously feeding but now silent (>3s without data)
+    if (this._wantRun && this._lastData > 0 && now - this._lastData > 3000) {
+      if (now - this._lastRefresh > 2000) {
+        this._lastRefresh = now;
+        this.start(this.url, this.offset);
+      }
+      return this.smooth;
+    }
+    // watchdog 3: ffmpeg process died (exitCode set, no more data coming)
+    if (this._wantRun && this.proc && this.proc.exitCode !== null && now - this._lastRefresh > 2000) {
+      this._lastRefresh = now;
       this.start(this.url, this.offset);
       return this.smooth;
     }
-    if (!this.proc || this.buf.length < NEED) return this.smooth;
+    if (!this.proc || this.proc.exitCode !== null || this.buf.length < NEED) return this.smooth;
     const s = new Float64Array(SPEC_N);
     for (let i = 0; i < SPEC_N; i++) {
       const v = this.buf.readInt16LE(i * 2) / 32768;
@@ -122,13 +189,12 @@ export class SpectrumAnalyzer {
     }
     const peak = Math.max(...bands, 1e-9);
     const norm = bands.map((m) => Math.log10(1 + 9 * (m / peak))); // per-frame auto-gain: always lively
-    this.smooth = !this.smooth ? norm : norm.map((v, i) => Math.max(v, this.smooth[i] * 0.9));
+    this.smooth = !this.smooth ? norm : norm.map((v, i) => Math.max(v, this.smooth[i] * (this.release ?? SPEC_SPEEDS.normal)));
 
     // ponytail: stuck-but-alive — values unmoved for 1s while not silent = restart.
     // Silence is exempt (stillness is the correct display). 5s cooldown so network stalls don't spam.
     const prev = this._lastFrame;
     this._lastFrame = this.smooth;
-    const now = Date.now();
     const moved = !prev || this.smooth.some((v, i) => Math.abs(v - prev[i]) > 0.02);
     if (moved) {
       this._lastMove = now;

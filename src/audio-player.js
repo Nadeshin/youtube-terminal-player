@@ -20,6 +20,8 @@ export class AudioPlayer extends EventEmitter {
     this.currentTrack = null;
     this._gen = 0; // ponytail: spawn generation id, stale events ignored
     this.analyzer = new SpectrumAnalyzer(); // realtime spectrum (off while paused/stopped)
+    this.volume = 100; // 0..100, default 100%
+    this.dropOnEnd = true; // spektrum di-drop saat lagu selesai (toggle di Settings)
   }
 
   async playTrack(track, streamUrl, startTime = 0) {
@@ -32,11 +34,13 @@ export class AudioPlayer extends EventEmitter {
     this.state = 'PLAYING';
 
     this._spawnPlayer(startTime);
+    this.analyzer.drop(); // lagu baru = spektrum bersih, tanpa sisa bentuk lagu lama
     this.analyzer.start(streamUrl, startTime);
     this.emit('stateChange', this.state);
   }
 
   getSpectrum() {
+    if (this.analyzer._wantRun) this.analyzer.offset = this.currentTime;
     return this.analyzer.levels();
   }
 
@@ -57,6 +61,7 @@ export class AudioPlayer extends EventEmitter {
       '--no-video',
       '--no-terminal',
       `--input-ipc-server=\\\\.\\pipe\\${pipeName}`,
+      `--volume=${this.volume}`,
     ];
     // ponytail: audio escape hatch (headless/CI: MPV_AO=null). Default: let mpv choose.
     if (process.env.MPV_AO) args.push(`--ao=${process.env.MPV_AO}`);
@@ -108,6 +113,9 @@ export class AudioPlayer extends EventEmitter {
       this.socket = sock;
       this._ipcBuf = '';
       this._mpvSend({ command: ['observe_property', 1, 'time-pos'] });
+      this._mpvSend({ command: ['observe_property', 2, 'volume'] });
+      // ensure mpv volume matches stored value (spawn arg covers most cases, but IPC is authoritative)
+      this._mpvSend({ command: ['set_property', 'volume', this.volume] });
     });
     sock.on('data', (d) => this._onIpcData(d, myGen));
     sock.on('error', giveUp);
@@ -138,6 +146,9 @@ export class AudioPlayer extends EventEmitter {
           this.currentTime = this.duration;
         }
         this.emit('timeupdate', this.currentTime);
+      } else if (msg.event === 'property-change' && msg.name === 'volume' && typeof msg.data === 'number') {
+        this.volume = Math.round(msg.data);
+        this.emit('volumeChange', this.volume);
       } else if (msg.event === 'end-file' && msg.reason === 'eof') {
         this._onEnded(myGen);
       }
@@ -148,6 +159,10 @@ export class AudioPlayer extends EventEmitter {
     if (myGen !== undefined && myGen !== this._gen) return;
     if (this.state !== 'PLAYING' || this.isManualStop) return;
     this.state = 'STOPPED';
+    if (this.dropOnEnd !== false) {
+      this.analyzer.stop();
+      this.analyzer.drop(); // lagu selesai = spektrum langsung jatuh ke nol, tidak nari sendiri
+    }
     this.emit('stateChange', this.state);
     this.emit('ended');
   }
@@ -197,9 +212,12 @@ export class AudioPlayer extends EventEmitter {
     // optimistic: mpv time-pos events correct it shortly after
     const target = this.currentTime + secondsDelta;
     this.currentTime = this.duration > 0 ? Math.max(0, Math.min(this.duration, target)) : Math.max(0, target);
-    // analysis follows (max 1x/sec so holding the key doesn't spam connections)
+    // analysis follows (max 1x/sec so holding the key doesn't spam connections).
+    // Skip restart saat mendarat <1.5 dtk dari akhir: ffmpeg tidak dapat data di
+    // posisi EOF (restart-dead-loop), lagu langsung selesai dan _onEnded yang drop.
     const now = Date.now();
-    if (!this._lastAnaStart || now - this._lastAnaStart > 1000) {
+    const nearEnd = this.duration > 0 && target >= this.duration - 1.5;
+    if ((!this._lastAnaStart || now - this._lastAnaStart > 1000) && !nearEnd) {
       this._lastAnaStart = now;
       this.analyzer.start(this.streamUrl, this.currentTime);
     }
@@ -210,6 +228,19 @@ export class AudioPlayer extends EventEmitter {
     // ponytail: restart stuck/desynced analysis — mpv untouched, song doesn't jump
     if (!this.streamUrl || this.state !== 'PLAYING') return;
     this.analyzer.start(this.streamUrl, this.currentTime);
+  }
+
+  setVolume(v) {
+    const clamped = Math.max(0, Math.min(100, Math.round(Number(v))));
+    if (!Number.isFinite(clamped)) return this.volume;
+    this.volume = clamped;
+    this._mpvSend({ command: ['set_property', 'volume', this.volume] });
+    this.emit('volumeChange', this.volume);
+    return this.volume;
+  }
+
+  adjustVolume(delta) {
+    return this.setVolume(this.volume + delta);
   }
 
   replay() {

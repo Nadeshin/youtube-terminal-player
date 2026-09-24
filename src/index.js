@@ -1,31 +1,48 @@
 import readline from 'readline';
 import chalk from 'chalk';
 import { ensureBinaries } from './installer.js';
-import { searchYouTube, getAudioStreamUrl, isYouTubeLink } from './yt-service.js';
+import { searchYouTube, getAudioStreamUrl, isYouTubeLink, getAutoTracks, resolveVideoId, randomFresh, nextAutoMode, autoModeLabel } from './yt-service.js';
 import { AudioPlayer } from './audio-player.js';
-import { renderUI, formatTime, requestFullRepaint } from './tui-renderer.js';
+import { renderUI, formatTime, SETTINGS_ROWS } from './tui-renderer.js';
+import { swapQueueItems, deleteQueueItem } from './queue-edit.js';
+import { applySpecSpeed, SPEC_SPEED_ORDER, specSpeedLabel, specDropFor } from './spectrum.js';
 
 // Application State
 let mode = 'SEARCH'; // 'SEARCH', 'RESULTS', 'PLAYER'
-let isPrompting = false; // ponytail: replaces the 'SEARCH_INPUT' mode that was never actually set
-let activePromptRl = null; // readline currently asking — force-cancellable via Esc when stuck
+let input = null; // editor sebaris aktif { purpose:'search', label, buf, cursor } atau null
 let searchQuery = '';
 let searchResults = [];
 let selectedIndex = 0;
 let queue = [];
+let autoFeed = true; // ponytail: autoplay similar tracks when the queue runs out (queue always wins)
+let autoMode = 'mix'; // 'mix' | 'acak' | 'artis' | 'channel' — what "next" means (Settings [s])
+let specSpeed = 'cepat'; // spectrum bar fall speed: 'lambat' | 'normal' | 'cepat' (Settings [s], default kencang)
+let specDrop = specDropFor(specSpeed); // ikut mode: lambat/normal drop, cepat tanpa drop
+let playHistory = new Set(); // videoIds already heard — autoplay never repeats these
+let autoCache = { forId: null, mode: 'mix', tracks: [], pick: null }; // prefetched candidates
+let settingsIndex = 0; // selected row in SETTINGS mode
+let settingsPrevMode = 'PLAYER'; // where [Esc] returns to
+let qeIndex = 0; // cursor in QUEUEEDIT mode
+let qeMark = null; // marked index for swap, null = none
+let qePrevMode = 'PLAYER'; // where [Esc] returns to
+let prefetchGen = 0; // stale prefetch results (track changed mid-fetch) are discarded
 let statusMessage = '';
 let uiRefreshInterval = null;
 let lastDrawnSec = -1;
 
 const player = new AudioPlayer();
+applySpecSpeed(player.analyzer, specSpeed); // default kencang
+player.dropOnEnd = specDrop;
 
 // Initialize terminal input
 readline.emitKeypressEvents(process.stdin);
 if (process.stdin.isTTY) {
-  process.stdin.setRawMode(true);
+  process.stdin.setRawMode(true); // mentah selamanya — prompt digambar sendiri per karakter
 }
+if (process.stdout.isTTY) process.stdout.write('\x1b[?2004l'); // paste polos, sekali di awal
 
 function updateUI() {
+  // satu penulis layar (tanpa readline) — repaint kapan pun aman, termasuk saat mengetik
   renderUI({
     mode,
     query: searchQuery,
@@ -33,6 +50,12 @@ function updateUI() {
     selectedIndex,
     player,
     queue,
+    autoFeed,
+    autoNext: peekAutoNext(),
+    settings: { autoFeed, autoMode, volume: player.volume, specSpeed, specDrop },
+    settingsIndex,
+    queueEdit: mode === 'QUEUEEDIT' ? { index: qeIndex, mark: qeMark } : null,
+    input,
     statusMessage,
   });
 }
@@ -47,7 +70,63 @@ function startUIRefreshLoop() {
   }
 }
 
-async function playTrackItem(track) {
+// ponytail: prefetch next-track candidates in the background while the song plays,
+// so the handoff is instant. Silent on failure — the on-demand fetch covers it.
+function prefetchAuto(track) {
+  if (!autoFeed) return;
+  const id = resolveVideoId(track);
+  if (!id) return;
+  const myGen = ++prefetchGen;
+  const myMode = autoMode;
+  autoCache = { forId: null, mode: myMode, tracks: [], pick: null }; // invalidate old candidates
+  getAutoTracks(track, 8, myMode).then((candidates) => {
+    if (myGen !== prefetchGen) return; // track changed mid-fetch — stale
+    if (resolveVideoId(player.currentTrack) !== id || autoMode !== myMode) return;
+    const exclude = new Set(playHistory);
+    for (const q of queue) {
+      const qid = resolveVideoId(q);
+      if (qid) exclude.add(qid);
+    }
+    // ponytail: acak locks its random pick now so UP NEXT doesn't flicker every render
+    const pick = myMode === 'acak' ? randomFresh(candidates, exclude) : pickFresh(candidates, exclude);
+    autoCache = { forId: id, mode: myMode, tracks: candidates, pick: pick || null };
+    updateUI(); // UP NEXT text appears once loaded
+  }).catch(() => { /* silent */ });
+}
+
+// ponytail: first candidate not heard and not sitting in the queue
+function pickFresh(candidates, exclude) {
+  return (candidates || []).find((t) => !exclude.has(resolveVideoId(t)));
+}
+
+// ponytail: what autoplay would play next — computed at render time so queue
+// edits mid-song are reflected. Null when the queue (which always wins) has items.
+function peekAutoNext() {
+  if (!autoFeed || mode === 'RESULTS' || mode === 'SETTINGS' || mode === 'QUEUEEDIT') return null;
+  if (!player.currentTrack || queue.length > 0) return null;
+  const curId = resolveVideoId(player.currentTrack);
+  if (autoCache.forId !== curId || autoCache.mode !== autoMode) return null;
+  const exclude = new Set(playHistory);
+  if (autoCache.pick && !exclude.has(resolveVideoId(autoCache.pick))) return autoCache.pick;
+  return pickFresh(autoCache.tracks, exclude) || null; // ordered fallback, never flickers
+}
+
+// ponytail: settings menu — remembers where it was opened from for [Esc]
+function openSettings() {
+  if (mode !== 'SETTINGS') settingsPrevMode = mode;
+  settingsIndex = 0;
+  mode = 'SETTINGS';
+  updateUI();
+}
+
+function closeSettings() {
+  const back = ['SEARCH', 'RESULTS', 'PLAYER'].includes(settingsPrevMode) ? settingsPrevMode : null;
+  mode = back || (player.currentTrack ? 'PLAYER' : 'SEARCH');
+  if (mode === 'RESULTS' && searchResults.length === 0) mode = player.currentTrack ? 'PLAYER' : 'SEARCH';
+  updateUI();
+}
+
+async function playTrackItem(track, isAuto = false) {
   try {
     statusMessage = `Fetching audio stream for "${track.title}"...`;
     player.state = 'LOADING';
@@ -60,11 +139,18 @@ async function playTrackItem(track) {
       return;
     }
 
-    statusMessage = `Now playing: ${track.title}`;
+    // ponytail: record identity so autoplay never replays it (cap 300, oldest evicted)
+    const id = resolveVideoId(track);
+    if (id) {
+      playHistory.add(id);
+      if (playHistory.size > 300) playHistory.delete(playHistory.values().next().value);
+    }
+    statusMessage = isAuto ? `Auto: ${track.title}` : `Now playing: ${track.title}`;
     lastDrawnSec = -1;
     await player.playTrack(track, streamUrl, 0);
     mode = 'PLAYER';
     updateUI();
+    prefetchAuto(track); // candidates for the NEXT handoff load while this song plays
   } catch (err) {
     statusMessage = `Error: ${err.message}`;
     updateUI();
@@ -72,14 +158,51 @@ async function playTrackItem(track) {
 }
 
 async function handleNextTrack() {
+  // ponytail: queue always wins — autoplay only fills the gap when the queue is empty
   if (queue.length > 0) {
     const nextTrack = queue.shift();
     await playTrackItem(nextTrack);
-  } else {
-    statusMessage = 'Queue finished.';
+    return;
+  }
+  if (autoFeed && player.currentTrack) {
+    const exclude = new Set(playHistory);
+    for (const q of queue) {
+      const qid = resolveVideoId(q);
+      if (qid) exclude.add(qid);
+    }
+    // ponytail: prefetched candidates first — instant handoff, no waiting.
+    // Exclude at pick time (not fetch time) since queue/history moved while playing.
+    const curId = resolveVideoId(player.currentTrack);
+    if (autoCache.forId === curId && autoCache.mode === autoMode && autoCache.tracks.length > 0) {
+      let pick = null;
+      if (autoCache.pick && !exclude.has(resolveVideoId(autoCache.pick))) pick = autoCache.pick;
+      else pick = autoMode === 'acak' ? randomFresh(autoCache.tracks, exclude) : pickFresh(autoCache.tracks, exclude);
+      if (pick) {
+        await playTrackItem(pick, true);
+        return;
+      }
+    }
+    statusMessage = 'Queue empty — finding a similar track...';
+    player.state = 'LOADING';
+    updateUI();
+    try {
+      const candidates = await getAutoTracks(player.currentTrack, 8, autoMode);
+      const pick = autoMode === 'acak' ? randomFresh(candidates, exclude) : pickFresh(candidates, exclude);
+      if (pick) {
+        await playTrackItem(pick, true);
+        return;
+      }
+      statusMessage = 'Auto-feed found nothing new — queue finished.';
+    } catch (err) {
+      statusMessage = `Auto-feed failed: ${err.message}`;
+    }
     player.stop();
     updateUI();
+    return;
   }
+  statusMessage = 'Queue finished.';
+  player.stop();
+  updateUI();
 }
 
 player.on('ended', () => {
@@ -100,107 +223,52 @@ player.on('error', (err) => {
   updateUI();
 });
 
-// Prompt user for search input
+player.on('volumeChange', () => {
+  updateUI();
+});
+
+// Prompt pencarian: editor sebaris (tanpa readline). Satu penulis layar →
+// ketikan/backspace/paste tak bisa balapan dengan repaint, dan stdin tak pernah macet.
 function promptSearch() {
-  if (isPrompting) return; // ponytail: prevent double prompts (mashing f)
-  isPrompting = true;
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(false);
+  if (input) return; // cegah prompt ganda (mashing f)
+  input = { purpose: 'search', label: 'Cari / tempel link (Esc=batal): ', buf: '', cursor: 0 };
+  updateUI();
+}
+
+async function submitSearch(raw) {
+  // strip bracketed-paste markers & ANSI jika terminal masih mengirimnya saat paste link
+  const queryStr = String(raw ?? '').replace(/\x1b\[200~|\x1b\[201~|\x1b\[[0-9;]*[A-Za-z]/g, '').trim();
+  if (!queryStr) {
+    statusMessage = 'Search cancelled.';
+    updateUI();
+    return;
   }
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  activePromptRl = rl;
+  searchQuery = queryStr;
+  statusMessage = `Searching YouTube for "${queryStr}"...`;
+  updateUI();
 
-  console.log('\n');
-  rl.question(chalk.bold.yellow('Title / Artist / YouTube link (Esc = cancel): '), async (input) => {
-    rl.close();
-    activePromptRl = null;
-    isPrompting = false;
-    requestFullRepaint(); // prompt leaves leftover text below the UI — one full repaint
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-    }
-    process.stdin.resume();
-
-    const queryStr = input.trim();
-    if (!queryStr) {
-      statusMessage = 'Search cancelled.';
-      updateUI();
-      return;
-    }
-
-    searchQuery = queryStr;
-    statusMessage = `Searching YouTube for "${queryStr}"...`;
-    updateUI();
-
-    try {
-      searchResults = await searchYouTube(queryStr);
-      if (searchResults.length === 0) {
-        statusMessage = `No results for "${queryStr}"`;
-        mode = 'SEARCH';
-      } else if (searchResults.length === 1 && isYouTubeLink(queryStr)) {
-        // Direct link play
-        await playTrackItem(searchResults[0]);
-        return;
-      } else {
-        mode = 'RESULTS';
-        selectedIndex = 0;
-        statusMessage = `Found ${searchResults.length} results. Pick a song to play.`;
-      }
-    } catch (err) {
-      statusMessage = `Search failed: ${err.message}`;
+  try {
+    searchResults = await searchYouTube(queryStr);
+    if (searchResults.length === 0) {
+      statusMessage = `No results for "${queryStr}"`;
       mode = 'SEARCH';
-    }
-    updateUI();
-  });
-}
-
-// Edit queue: delete by number or all (same readline pattern as promptSearch)
-function promptQueueEdit() {
-  if (isPrompting) return;
-  isPrompting = true;
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(false);
-  }
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  activePromptRl = rl;
-
-  console.log('\n');
-  rl.question(chalk.bold.yellow(`Delete queue number (1-${queue.length}) or "all" (Esc = cancel): `), (input) => {
-    rl.close();
-    activePromptRl = null;
-    isPrompting = false;
-    requestFullRepaint(); // prompt leaves leftover text below the UI — one full repaint
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-    }
-    process.stdin.resume();
-
-    const s = input.trim().toLowerCase();
-    if (s === 'semua' || s === 'all' || s === '0') {
-      statusMessage = `${queue.length} songs removed from the queue.`;
-      queue = [];
     } else {
-      const num = parseInt(s, 10);
-      if (!Number.isNaN(num) && num >= 1 && num <= queue.length) {
-        const removed = queue.splice(num - 1, 1)[0];
-        statusMessage = `Removed from queue: "${removed.title}"`;
-      } else {
-        statusMessage = 'Queue edit cancelled.';
-      }
+      // ponytail: link tidak auto-play — tinjau dulu (Enter=putar, a=antrean)
+      mode = 'RESULTS';
+      selectedIndex = 0;
+      statusMessage = isYouTubeLink(queryStr)
+        ? `Link ditemukan: "${searchResults[0].title}" — [Enter] Putar langsung, [a] Masuk antrean`
+        : `Found ${searchResults.length} results. Pick a song to play.`;
     }
-    updateUI();
-  });
+  } catch (err) {
+    statusMessage = `Search failed: ${err.message}`;
+    mode = 'SEARCH';
+  }
+  updateUI();
 }
 
-// Queue-edit entry from any mode (auto-pause like 'f': prompts can't survive redraws)
+// Layar edit antrean pakai panah (tanpa ketik, tanpa prompt): ingat asal untuk [Esc]
 function openQueueEdit() {
   if (queue.length === 0) {
     statusMessage = 'Queue is empty — add some with [f] then [a] first.';
@@ -210,34 +278,85 @@ function openQueueEdit() {
   if (player.state === 'PLAYING') {
     player.pause();
   } else if (player.state === 'LOADING') {
-      statusMessage = 'Wait for the song to start before editing the queue.';
+    statusMessage = 'Wait for the song to start before editing the queue.';
     updateUI();
     return;
   }
-  promptQueueEdit();
+  if (mode !== 'QUEUEEDIT') qePrevMode = mode;
+  qeIndex = 0;
+  qeMark = null;
+  mode = 'QUEUEEDIT';
+  updateUI();
+}
+
+function closeQueueEdit() {
+  const back = ['SEARCH', 'RESULTS', 'PLAYER'].includes(qePrevMode) ? qePrevMode : null;
+  mode = back || (player.currentTrack ? 'PLAYER' : 'SEARCH');
+  if (mode === 'RESULTS' && searchResults.length === 0) mode = player.currentTrack ? 'PLAYER' : 'SEARCH';
+  qeMark = null;
+  updateUI();
 }
 
 // Handle Keyboard Inputs
 process.stdin.on('keypress', async (str, key) => {
   if (!key) return;
-  // While typing in a prompt, ignore all hotkeys except Ctrl+C and Esc
-  if (isPrompting) {
-    if (key.ctrl && key.name === 'c') {
-      player.stop();
-      if (uiRefreshInterval) clearInterval(uiRefreshInterval);
-      process.exit(0);
-    }
-    // ponytail: way out of a stuck prompt (hung search) — without this only Ctrl+C works.
-    // a cancelled rl.question never calls its callback, so the flag is reset manually here.
-    if (key.name === 'escape' && activePromptRl) {
-      try { activePromptRl.close(); } catch { /* abaikan */ }
-      activePromptRl = null;
-      isPrompting = false;
-      statusMessage = 'Cancelled.';
-      requestFullRepaint();
+  // Mode ketik: editor sebaris milik sendiri. Semua kunci lain ditelan selama mengetik.
+  // (Ctrl+C tetap keluar via handler quit di bawah.)
+  if (input) {
+    const chars = [...input.buf];
+    if (key.name === 'escape') {
+      input = null;
+      statusMessage = 'Search cancelled.';
       updateUI();
+      return;
     }
-    return;
+    if (key.name === 'return' || key.name === 'enter') {
+      const buf = input.buf;
+      input = null;
+      submitSearch(buf);
+      return;
+    }
+    if (key.name === 'backspace') {
+      if (input.cursor > 0) {
+        chars.splice(input.cursor - 1, 1);
+        input.buf = chars.join('');
+        input.cursor--;
+      }
+      updateUI();
+      return;
+    }
+    if (key.name === 'delete') {
+      if (input.cursor < chars.length) {
+        chars.splice(input.cursor, 1);
+        input.buf = chars.join('');
+      }
+      updateUI();
+      return;
+    }
+    if (key.name === 'left') {
+      input.cursor = Math.max(0, input.cursor - 1);
+      updateUI();
+      return;
+    }
+    if (key.name === 'right') {
+      input.cursor = Math.min(chars.length, input.cursor + 1);
+      updateUI();
+      return;
+    }
+    if (key.ctrl && key.name === 'u') {
+      input.buf = '';
+      input.cursor = 0;
+      updateUI();
+      return;
+    }
+    if (typeof str === 'string' && str.length === 1 && str >= ' ' && !key.ctrl && !key.meta) {
+      chars.splice(input.cursor, 0, str);
+      input.buf = chars.join('');
+      input.cursor++;
+      updateUI();
+      return;
+    }
+    return; // telan sisanya (panah atas/bawah dsb.) selama mengetik
   }
   // Exit application (Ctrl+C or 'q')
   if ((key.ctrl && key.name === 'c') || key.name === 'q') {
@@ -265,6 +384,18 @@ process.stdin.on('keypress', async (str, key) => {
     return;
   }
 
+  // Hotkey 't' -> Auto-feed toggle (works in every mode, like 'f'; not in QUEUEEDIT where [t] = tukar)
+  if (key.name === 't' && mode !== 'QUEUEEDIT') {
+    autoFeed = !autoFeed;
+    statusMessage = autoFeed
+      ? 'Auto-feed ON — similar tracks play when the queue runs out.'
+      : 'Auto-feed OFF — playback stops when the queue ends.';
+    updateUI();
+    // ponytail: toggled on mid-song → start loading candidates now so they're ready
+    if (autoFeed && player.currentTrack && player.state === 'PLAYING') prefetchAuto(player.currentTrack);
+    return;
+  }
+
   // Hotkey 'v' -> Refresh spectrum (restarts stuck analysis, mpv untouched)
   if (key.name === 'v') {
     if (player.state === 'PLAYING' && player.streamUrl) {
@@ -274,6 +405,132 @@ process.stdin.on('keypress', async (str, key) => {
       statusMessage = 'Spectrum only runs while a song is playing.';
     }
     updateUI();
+    return;
+  }
+
+  // Hotkey 's' -> Settings menu (works in every mode, like 'f'; not in QUEUEEDIT)
+  if (key.name === 's' && mode !== 'SETTINGS' && mode !== 'QUEUEEDIT') {
+    openSettings();
+    return;
+  }
+
+  // Hotkey +/- -> Volume (global, works in every mode except prompt)
+  if (str === '+' || str === '=' || key.name === 'equal' || key.name === 'plus') {
+    const v = player.adjustVolume(5);
+    statusMessage = `Volume: ${v}%`;
+    updateUI();
+    return;
+  }
+  if (str === '-' || str === '_' || key.name === 'minus' || key.name === 'underscore') {
+    const v = player.adjustVolume(-5);
+    statusMessage = `Volume: ${v}%`;
+    updateUI();
+    return;
+  }
+
+  // Settings mode navigation
+  if (mode === 'SETTINGS') {
+    if (key.name === 'up') {
+      settingsIndex = (settingsIndex + SETTINGS_ROWS.length - 1) % SETTINGS_ROWS.length;
+      updateUI();
+      return;
+    }
+    if (key.name === 'down') {
+      settingsIndex = (settingsIndex + 1) % SETTINGS_ROWS.length;
+      updateUI();
+      return;
+    }
+    if (key.name === 'escape' || key.name === 's') {
+      statusMessage = '';
+      closeSettings();
+      return;
+    }
+    if (key.name === 'left' || key.name === 'right' || key.name === 'return' || key.name === 'enter') {
+      const rowId = SETTINGS_ROWS[settingsIndex];
+      if (rowId === 'volume') {
+        const delta = key.name === 'left' ? -5 : 5;
+        // enter on volume also bumps +5 (consistent)
+        const v = player.adjustVolume(delta);
+        statusMessage = `Volume: ${v}%`;
+      } else if (rowId === 'autofeed') {
+        autoFeed = !autoFeed;
+        statusMessage = autoFeed
+          ? 'Auto-feed ON — similar tracks play when the queue runs out.'
+          : 'Auto-feed OFF — playback stops when the queue ends.';
+      } else if (rowId === 'mode') {
+        autoMode = nextAutoMode(autoMode);
+        statusMessage = `Auto-feed mode: ${autoModeLabel(autoMode)}.`;
+      } else if (rowId === 'spectrum') {
+        specSpeed = SPEC_SPEED_ORDER[(SPEC_SPEED_ORDER.indexOf(specSpeed) + 1) % SPEC_SPEED_ORDER.length];
+        applySpecSpeed(player.analyzer, specSpeed);
+        specDrop = specDropFor(specSpeed);
+        player.dropOnEnd = specDrop;
+        statusMessage = `Spectrum: ${specSpeedLabel(specSpeed)} (${specDrop ? 'drop saat selesai' : 'tanpa drop'}).`;
+      } else {
+        statusMessage = '';
+        closeSettings();
+        return;
+      }
+      // ponytail: changed mid-song → reload candidates now so UP NEXT is fresh
+      if (autoFeed && player.currentTrack && player.state === 'PLAYING') prefetchAuto(player.currentTrack);
+      else autoCache = { forId: null, mode: autoMode, tracks: [], pick: null };
+      updateUI();
+      return;
+    }
+    return; // swallow all other keys in settings
+  }
+
+  // Queue-edit mode: arrow navigation, no typing (like SETTINGS)
+  if (mode === 'QUEUEEDIT') {
+    if (key.name === 'up') {
+      qeIndex = (qeIndex + queue.length - 1) % queue.length;
+      updateUI();
+      return;
+    }
+    if (key.name === 'down') {
+      qeIndex = (qeIndex + 1) % queue.length;
+      updateUI();
+      return;
+    }
+    if (key.name === 'escape') {
+      closeQueueEdit();
+      return;
+    }
+    if (key.name === 't') {
+      if (qeMark == null) {
+        qeMark = qeIndex;
+        statusMessage = `Ditandai: "${queue[qeMark].title}" — arahkan kursor lalu [t] untuk tukar.`;
+      } else if (qeMark === qeIndex) {
+        qeMark = null;
+        statusMessage = 'Tanda dibatalkan.';
+      } else {
+        const r = swapQueueItems(queue, qeMark + 1, qeIndex + 1);
+        queue = r.list;
+        statusMessage = r.message;
+        qeMark = null;
+      }
+      updateUI();
+      return;
+    }
+    if (key.name === 'h' || key.name === 'x' || key.name === 'delete' || key.name === 'backspace') {
+      const r = deleteQueueItem(queue, qeIndex + 1);
+      queue = r.list;
+      statusMessage = r.message;
+      qeMark = null;
+      if (queue.length === 0) {
+        closeQueueEdit();
+        return;
+      }
+      qeIndex = Math.min(qeIndex, queue.length - 1);
+      updateUI();
+      return;
+    }
+    return; // swallow all other keys in queue-edit
+  }
+
+  // Hotkey 'd' -> Edit queue order (works in SEARCH/RESULTS/PLAYER, like 'f')
+  if (key.name === 'd') {
+    openQueueEdit();
     return;
   }
 
@@ -305,10 +562,6 @@ process.stdin.on('keypress', async (str, key) => {
       mode = player.currentTrack ? 'PLAYER' : 'SEARCH';
       statusMessage = '';
       updateUI();
-      return;
-    }
-    if (key.name === 'd') {
-      openQueueEdit();
       return;
     }
   }
@@ -344,10 +597,6 @@ process.stdin.on('keypress', async (str, key) => {
     await handleNextTrack();
     return;
   }
-  if (key.name === 'd') {
-    openQueueEdit();
-    return;
-  }
 });
 
 // App Startup
@@ -366,12 +615,11 @@ async function main() {
     updateUI();
     try {
       searchResults = await searchYouTube(initialQuery);
-      if (searchResults.length === 1 && isYouTubeLink(initialQuery)) {
-        // ponytail: link args play immediately, don't park in RESULTS
-        await playTrackItem(searchResults[0]);
-        return;
-      }
       if (searchResults.length > 0) {
+        // ponytail: link arg juga tinjau dulu — tidak auto-play
+        statusMessage = isYouTubeLink(initialQuery)
+          ? `Link ditemukan: "${searchResults[0].title}" — [Enter] Putar langsung, [a] Masuk antrean`
+          : `Found ${searchResults.length} results. Pick a song to play.`;
         mode = 'RESULTS';
         selectedIndex = 0;
       } else {

@@ -4,11 +4,14 @@ Play YouTube music or podcasts right from your terminal. No browser, no video, n
 
 Made for coding sessions: search a song, queue a few more, get back to work. Everything is keyboard-driven.
 
+> **v1.2.0** — pasted links are reviewed first (no more instant play), inline search editor (pasting never glitches the prompt), visual queue editor (reorder + delete), spectrum speed setting.
+
 ## ✨ Features
 
 - **Truly audio-only** — streams just the sound, way lighter than opening YouTube.
-- **Search or paste a link** — type a title/artist, or paste `youtube.com`, `youtu.be`, even a raw video ID or a `watch?v=...&list=...` link (plays that video, not the whole playlist).
+ - **Search or paste a link** — type a title/artist, or paste `youtube.com`, `youtu.be`, even a raw video ID or a `watch?v=...&list=...` link. Links are reviewed first (that video only, never the whole playlist): `Enter` plays it, `a` queues it.
 - **Song queue** — add multiple tracks, auto-advances when one ends.
+- **Auto-feed** — when the queue runs out, similar tracks keep the music going. Queue always wins, heard songs never repeat. Toggle with `t`, or open Settings with `s` to pick the mode: Related Mix, Random, Same Artist, Same Channel.
 - **Full keyboard control** — play/pause, 10-second skip, replay, next, queue editing.
 - **Real-time spectrum** — an FFT frequency panel that moves with the song, not a fake animation. Stuck for >1 second? It restarts itself, or press `v`.
 - **Never gets stuck** — searches time out, frozen prompts can be cancelled with `Esc`. No more "only Ctrl+C works" moments.
@@ -44,7 +47,10 @@ npm start -- "lofi hip hop"
 | `↑` / `↓` | Select a song (in search results) |
 | `Enter` | Play the selected song |
 | `a` | Add the selected song to the queue |
-| `d` | Edit the queue (delete by number / clear all) |
+| `d` | Edit the queue (↑/↓ move, `t` mark + swap, `h`/`x` delete) |
+| `t` | Toggle auto-feed (in queue editor: mark/swap instead) |
+| `s` | Settings (auto-feed, mode, spectrum speed, volume) |
+| `+` / `-` | Volume up / down |
 | `Esc` | Leave search / cancel typing |
 | `f` | Search for a new song (playing track auto-pauses) |
 | `v` | Refresh the spectrum manually |

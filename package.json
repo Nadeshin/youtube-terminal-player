@@ -1,6 +1,6 @@
 {
   "name": "youtube-terminal-player",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Terminal YouTube audio player, no browser needed",
   "main": "src/index.js",
   "type": "module",
