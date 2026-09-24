@@ -3,6 +3,9 @@ bin/*.exe
 bin/*.7z
 bin/*.extract/
 
+# build artifact (rebuild via tools/build-exe.ps1) — shipped as Release asset, not git
+/yt-player.exe
+
 # deps & logs
 node_modules/
 *.log
